@@ -73,9 +73,9 @@ export async function runReview({ pr, files, llm, reviewConfig, guidelines = '',
 
   const results = await mapWithConcurrency(chunks, reviewConfig.concurrency, async (entries, i) => {
     const user = buildUserPrompt({ pr, entries, allPaths, chunkIndex: i, chunkCount: chunks.length, skipped });
-    const { review, usage } = await llm.review({ system, user, entries });
+    const { review, usage, model } = await llm.review({ system, user, entries });
     if (usage) logger.debug(`Chunk ${i + 1}/${chunks.length} usage`, JSON.stringify(usage));
-    return normalizeReview(review);
+    return { ...normalizeReview(review), model: model || llm.name };
   });
 
   const failures = results.filter(r => !r.ok).map(r => r.error);
@@ -90,7 +90,7 @@ export async function runReview({ pr, files, llm, reviewConfig, guidelines = '',
   const summaries = succeeded.map(r => r.summary).filter(Boolean);
 
   return {
-    model: llm.name,
+    model: [...new Set(succeeded.map(r => r.model))].join(', ') || llm.name,
     summary: summaries.length > 1 ? summaries.map(s => `- ${s}`).join('\n') : summaries[0] || '',
     verdict: computeVerdict(findings),
     findings,

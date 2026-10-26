@@ -37,7 +37,7 @@ export function createAnthropicClient(llmConfig, { fetchImpl } = {}) {
       }
       const toolUse = (data.content || []).find(c => c.type === 'tool_use' && c.name === 'submit_review');
       if (!toolUse) throw new Error('Anthropic response did not include a submit_review tool call');
-      return { review: toolUse.input, usage: data.usage };
+      return { review: toolUse.input, usage: data.usage, model: `anthropic/${model}` };
     }
   };
 }

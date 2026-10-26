@@ -2,7 +2,7 @@
 
 LLM-powered pull request reviewer for Bitbucket Cloud. It receives Bitbucket webhooks (or runs from
 the CLI / Bitbucket Pipelines), sends the diff to **Claude** (Anthropic) or any **OpenAI-compatible**
-model, and posts:
+model, with automatic fallback to free / open-source models (Ollama, Groq, OpenRouter, Gemini, Hugging Face, ...), and posts:
 
 - **inline comments** anchored to the exact changed lines, and
 - a **summary comment** with verdict, severity counts and any findings that could not be anchored.
@@ -45,16 +45,49 @@ Bitbucket webhook: **Repository settings → Webhooks → Add webhook**
 Bitbucket credentials need `pullrequest:write` and `repository:read`. A repository/workspace access token
 (`BITBUCKET_ACCESS_TOKEN`) is recommended; username + app password is also supported.
 
-### Choosing a model
+### Choosing a model (with free / open-source fallbacks)
 
-| Provider | Env | Notes |
-|---|---|---|
-| Anthropic Claude | `AI_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Default model `claude-sonnet-4-5`. Uses prompt caching for the system prompt across chunks. |
-| OpenAI | `AI_PROVIDER=openai`, `OPENAI_API_KEY`, `OPENAI_MODEL` | Chat Completions with strict JSON schema. |
-| OpenAI-compatible | `AI_PROVIDER=openai`, `OPENAI_BASE_URL`, `OPENAI_MODEL` | Azure OpenAI v1, OpenRouter, LiteLLM, vLLM, Ollama… |
-| Mock | `AI_PROVIDER=mock` | Offline heuristics for local development. |
+`AI_PROVIDER` takes a comma-separated chain (plus optional `AI_FALLBACK_PROVIDERS`). Each chunk is sent
+to the first provider; if it fails after retries (outage, exhausted quota, invalid key, network), the
+next one is tried. A provider that failed is skipped for `LLM_FALLBACK_COOLDOWN_MS` (default 5 min), so
+the rest of the PR doesn't wait on it again. The summary comment shows which model(s) did the review.
 
-If `AI_PROVIDER` is unset it is picked from whichever API key is present (Anthropic first).
+```bash
+AI_PROVIDER=anthropic,groq,ollama      # Claude first, then Groq's free tier, then a local model
+```
+
+If `AI_PROVIDER` is unset, every provider with credentials is chained in this order: anthropic, openai,
+gemini, groq, openrouter, mistral, huggingface, deepseek, ollama. With nothing configured it uses `mock`.
+
+| Provider | Key env | Default model | Notes |
+|---|---|---|---|
+| `anthropic` (`claude`) | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` | Forced tool-use output, prompt caching. |
+| `openai` | `OPENAI_API_KEY` | `gpt-4.1` | Strict JSON schema. With `OPENAI_BASE_URL`, also works with any OpenAI-compatible server (vLLM, LM Studio, LocalAI, LiteLLM, Azure v1). |
+| `ollama` (`local`) | none | `qwen2.5-coder:14b` | Self-hosted open-source models. Enable with `OLLAMA_MODEL` / `OLLAMA_BASE_URL`. |
+| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Free tier, very fast. |
+| `openrouter` | `OPENROUTER_API_KEY` | `meta-llama/llama-3.3-70b-instruct:free` | Many `:free` open models. |
+| `gemini` (`google`) | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini-2.5-flash` | Free tier through Google's OpenAI-compatible endpoint. |
+| `huggingface` (`hf`) | `HF_TOKEN` | `Qwen/Qwen2.5-Coder-32B-Instruct` | HF Inference Providers router. |
+| `mistral` | `MISTRAL_API_KEY` | `mistral-small-latest` | Free "Experiment" tier. |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` | Open-weights model, low cost. |
+| `mock` | none | heuristics | Offline rules for local development. |
+
+Free-tier model names and limits change often. Override the model with `<PREFIX>_MODEL` (for example `GROQ_MODEL`).
+
+Open-source models and gateways support structured output unevenly. Each provider starts with the best
+mode it supports (`json_schema` or `json_object`). If the server rejects it, the client drops to
+`json_object` and then to plain prompting, and pulls the JSON out of the reply. Force a mode with
+`<PREFIX>_STRUCTURED_OUTPUT=json_schema|json_object|none`.
+
+**Running locally with Ollama**
+
+```bash
+ollama pull qwen2.5-coder:14b
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve   # Ollama's default context is small and silently truncates prompts
+AI_PROVIDER=ollama OLLAMA_MODEL=qwen2.5-coder:14b MAX_DIFF_CHARS=40000 npm start
+```
+
+Smaller local models review better with smaller chunks (`MAX_DIFF_CHARS`) and `MIN_CONFIDENCE=0.7` to cut noise.
 
 ### Review profiles and repo guidelines
 

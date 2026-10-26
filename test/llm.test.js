@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAnthropicClient } from '../src/llm/anthropic.js';
-import { createOpenAiClient } from '../src/llm/openai.js';
+import { createOpenAiCompatibleClient } from '../src/llm/openai.js';
 import { createMockClient } from '../src/llm/mock.js';
 import { loadConfig } from '../src/config/env.js';
 import { parseUnifiedDiff } from '../src/utils/diff.js';
@@ -54,7 +54,7 @@ test('openai client uses json_schema structured output', async () => {
     sent = { url, body: JSON.parse(init.body), auth: init.headers.Authorization };
     return jsonResponse(200, { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(review) } }] });
   };
-  const out = await createOpenAiClient(llmConfig, { fetchImpl }).review({ system: 's', user: 'u' });
+  const out = await createOpenAiCompatibleClient('openai', llmConfig.compat.openai, llmConfig, { fetchImpl }).review({ system: 's', user: 'u' });
   assert.deepEqual(out.review, review);
   assert.equal(sent.url, 'https://api.openai.com/v1/chat/completions');
   assert.equal(sent.auth, 'Bearer o-key');
@@ -64,7 +64,7 @@ test('openai client uses json_schema structured output', async () => {
 
 test('openai client rejects truncated output', async () => {
   const fetchImpl = async () => jsonResponse(200, { choices: [{ finish_reason: 'length', message: { content: '{' } }] });
-  await assert.rejects(createOpenAiClient(llmConfig, { fetchImpl }).review({ system: 's', user: 'u' }), /truncated/);
+  await assert.rejects(createOpenAiCompatibleClient('openai', llmConfig.compat.openai, llmConfig, { fetchImpl }).review({ system: 's', user: 'u' }), /truncated/);
 });
 
 test('mock client flags heuristics on added lines', async () => {

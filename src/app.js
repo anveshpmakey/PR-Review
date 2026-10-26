@@ -11,7 +11,7 @@ export function createApp({ config, queue }) {
   }));
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, provider: config.llm.provider, queue: queue.stats?.() });
+    res.json({ ok: true, providers: config.llm.providers, queue: queue.stats?.() });
   });
 
   app.use('/webhook', createWebhookRouter({ config, queue }));

@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import { ALL_PROVIDERS, AUTO_ORDER, COMPAT_PRESETS } from '../llm/presets.js';
 
 dotenv.config();
 
@@ -35,14 +36,62 @@ function list(env, name) {
     .filter(Boolean);
 }
 
-function defaultProvider(env) {
-  if (env.AI_PROVIDER) {
-    const p = env.AI_PROVIDER.toLowerCase();
-    return p === 'claude' ? 'anthropic' : p;
-  }
-  if (env.ANTHROPIC_API_KEY) return 'anthropic';
-  if (env.OPENAI_API_KEY) return 'openai';
-  return 'mock';
+function normalizeProvider(name) {
+  const p = name.trim().toLowerCase();
+  const aliases = { claude: 'anthropic', google: 'gemini', hf: 'huggingface', local: 'ollama' };
+  return aliases[p] || p;
+}
+
+function compatConfig(env) {
+  return Object.fromEntries(Object.entries(COMPAT_PRESETS).map(([name, preset]) => {
+    const prefix = preset.envPrefix;
+    const keyEnv = preset.keyEnv || [`${prefix}_API_KEY`];
+    return [name, {
+      apiKey: keyEnv.map(k => str(env, k)).find(Boolean) || '',
+      model: str(env, `${prefix}_MODEL`, preset.model),
+      baseUrl: str(env, `${prefix}_BASE_URL`, preset.baseUrl),
+      structuredOutput: str(env, `${prefix}_STRUCTURED_OUTPUT`, preset.structuredOutput),
+      tokenParam: str(env, `${prefix}_TOKEN_PARAM`, preset.tokenParam),
+      requiresKey: preset.requiresKey,
+      explicitlyConfigured: Boolean(env[`${prefix}_BASE_URL`] || env[`${prefix}_MODEL`])
+    }];
+  }));
+}
+
+function isConfigured(provider, anthropic, compat) {
+  if (provider === 'anthropic') return Boolean(anthropic.apiKey);
+  const c = compat[provider];
+  if (!c) return false;
+  return c.requiresKey ? Boolean(c.apiKey) : c.explicitlyConfigured;
+}
+
+function resolveProviders(env, anthropic, compat) {
+  const explicit = [...list(env, 'AI_PROVIDER'), ...list(env, 'AI_FALLBACK_PROVIDERS')].map(normalizeProvider);
+  if (explicit.length) return [...new Set(explicit)];
+  const detected = AUTO_ORDER.filter(p => isConfigured(p, anthropic, compat));
+  return detected.length ? detected : ['mock'];
+}
+
+function buildLlmConfig(env) {
+  const anthropic = {
+    apiKey: str(env, 'ANTHROPIC_API_KEY'),
+    model: str(env, 'ANTHROPIC_MODEL', 'claude-sonnet-4-5'),
+    baseUrl: str(env, 'ANTHROPIC_BASE_URL', 'https://api.anthropic.com')
+  };
+  const compat = compatConfig(env);
+  const providers = resolveProviders(env, anthropic, compat);
+  return {
+    providers,
+    provider: providers[0],
+    maxOutputTokens: num(env, 'LLM_MAX_OUTPUT_TOKENS', 8192),
+    temperature: optionalNum(env, 'LLM_TEMPERATURE'),
+    timeoutMs: num(env, 'LLM_TIMEOUT_MS', 180000),
+    maxRetries: num(env, 'LLM_MAX_RETRIES', 3),
+    fallbackCooldownMs: num(env, 'LLM_FALLBACK_COOLDOWN_MS', 300000),
+    anthropic,
+    compat,
+    openai: compat.openai
+  };
 }
 
 export function loadConfig(env = process.env) {
@@ -61,23 +110,7 @@ export function loadConfig(env = process.env) {
     },
     webhookSecret: str(env, 'WEBHOOK_SECRET'),
     allowedRepos: list(env, 'ALLOWED_REPOS'),
-    llm: {
-      provider: defaultProvider(env),
-      maxOutputTokens: num(env, 'LLM_MAX_OUTPUT_TOKENS', 8192),
-      temperature: optionalNum(env, 'LLM_TEMPERATURE'),
-      timeoutMs: num(env, 'LLM_TIMEOUT_MS', 180000),
-      maxRetries: num(env, 'LLM_MAX_RETRIES', 3),
-      anthropic: {
-        apiKey: str(env, 'ANTHROPIC_API_KEY'),
-        model: str(env, 'ANTHROPIC_MODEL', 'claude-sonnet-4-5'),
-        baseUrl: str(env, 'ANTHROPIC_BASE_URL', 'https://api.anthropic.com')
-      },
-      openai: {
-        apiKey: str(env, 'OPENAI_API_KEY'),
-        model: str(env, 'OPENAI_MODEL', 'gpt-4.1'),
-        baseUrl: str(env, 'OPENAI_BASE_URL', 'https://api.openai.com/v1')
-      }
-    },
+    llm: buildLlmConfig(env),
     review: {
       profile: str(env, 'REVIEW_PROFILE', 'general').toLowerCase(),
       guidelines: str(env, 'REVIEW_GUIDELINES'),
@@ -107,13 +140,15 @@ export function validateConfig(cfg) {
   if (!bb.accessToken && !(bb.username && bb.appPassword)) {
     errors.push('Set BITBUCKET_ACCESS_TOKEN or both BITBUCKET_USERNAME and BITBUCKET_APP_PASSWORD');
   }
-  const { provider } = cfg.llm;
-  if (!['anthropic', 'openai', 'mock'].includes(provider)) {
-    errors.push(`AI_PROVIDER must be one of anthropic|openai|mock, got "${provider}"`);
-  }
-  if (provider === 'anthropic' && !cfg.llm.anthropic.apiKey) errors.push('ANTHROPIC_API_KEY is required when AI_PROVIDER=anthropic');
-  if (provider === 'openai' && !cfg.llm.openai.apiKey && cfg.llm.openai.baseUrl === 'https://api.openai.com/v1') {
-    errors.push('OPENAI_API_KEY is required when AI_PROVIDER=openai');
+  for (const provider of cfg.llm.providers) {
+    if (!ALL_PROVIDERS.includes(provider)) {
+      errors.push(`Unknown AI provider "${provider}". Supported: ${ALL_PROVIDERS.join(', ')}`);
+    } else if (provider === 'anthropic' && !cfg.llm.anthropic.apiKey) {
+      errors.push('ANTHROPIC_API_KEY is required for provider anthropic');
+    } else if (cfg.llm.compat[provider]?.requiresKey && !cfg.llm.compat[provider].apiKey
+      && cfg.llm.compat[provider].baseUrl === COMPAT_PRESETS[provider].baseUrl) {
+      errors.push(`An API key is required for provider ${provider} (${(COMPAT_PRESETS[provider].keyEnv || [`${COMPAT_PRESETS[provider].envPrefix}_API_KEY`]).join(' or ')})`);
+    }
   }
   if (errors.length) throw new Error(`Invalid configuration:\n - ${errors.join('\n - ')}`);
   return cfg;
