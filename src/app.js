@@ -1,18 +1,23 @@
 import express from 'express';
-import { webhookRouter } from './routes/webhook.js';
+import { createWebhookRouter } from './routes/webhook.js';
 
-export function createApp() {
+export function createApp({ config, queue }) {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({
+    limit: '5mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    }
+  }));
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true });
+    res.json({ ok: true, provider: config.llm.provider, queue: queue.stats?.() });
   });
 
-  app.use('/webhook', webhookRouter);
+  app.use('/webhook', createWebhookRouter({ config, queue }));
 
   app.use((err, _req, res, _next) => {
-    res.status(500).json({ error: err.message || 'Internal Server Error' });
+    res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
   });
 
   return app;
